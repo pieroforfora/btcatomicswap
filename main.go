@@ -103,7 +103,7 @@ type command interface {
 
 
 type daemonCommand interface {
-	runCommand(*rpc.Client) error
+	runDaemonCommand(*rpc.Client) (any,error)
 }
 
 // offline commands don't require wallet RPC.
@@ -188,7 +188,11 @@ func checkCmdArgLength(args []string, required int) (nArgs int) {
 	}
 	return required
 }
-
+func deferrer(client *rpc.Client){
+    fmt.Println("defunc")
+    client.Shutdown()
+    client.WaitForShutdown()
+}
 func run() (err error, showUsage bool) {
 	flagset.Parse(os.Args[1:])
 	args := flagset.Args()
@@ -300,19 +304,36 @@ func run() (err error, showUsage bool) {
 	if cmd, ok := cmd.(offlineCommand); ok {
 		return cmd.runOfflineCommand(), false
 	}
-  client,err := getClient()
-  if err!= nil{
-    return err,true
+  connConfig := getClientConfig()
+  client, err := rpc.New(&connConfig, nil)
+  if err != nil {
+    fmt.Errorf("rpc connect: %v", err)
   }
+  defer deferrer(client)
+  params := []json.RawMessage{[]byte(`"atomicswap"`)}
+
+  _, err = client.RawRequest("loadwallet", params)
+  if nil != err {
+    fmt.Errorf("failed to load wallet",err)
+  }
+  fmt.Println("wallet loaded")
+
 	err = cmd.runCommand(client)
 	return err, false
 }
-func getClient() (*rpc.Client,error){
-  connect, err := normalizeAddress(*connectFlag, walletPort(chainParams))
+func getClientConfig() (rpc.ConnConfig){
+  return rpc.ConnConfig{
+    Host:         "localhost:18443",
+    User:         "pieroforfora",
+    Pass:         "1234",
+    DisableTLS:   true,
+    HTTPPostMode: true,
+  }
+
+  /*connect, err := normalizeAddress(*connectFlag, walletPort(chainParams))
   if err != nil {
     return nil,fmt.Errorf("wallet server address: %v", err)
   }
-
   connConfig := &rpc.ConnConfig{
     Host:         connect,
     User:         *rpcuserFlag,
@@ -320,15 +341,7 @@ func getClient() (*rpc.Client,error){
     DisableTLS:   true,
     HTTPPostMode: true,
   }
-  client, err := rpc.New(connConfig, nil)
-  if err != nil {
-    return nil,fmt.Errorf("rpc connect: %v", err)
-  }
-  defer func() {
-    client.Shutdown()
-    client.WaitForShutdown()
-  }()
-  return client,nil
+*/
 }
 
 func addressFromString(arg string) (*btcutil.AddressPubKeyHash, error){
@@ -342,7 +355,9 @@ func addressFromString(arg string) (*btcutil.AddressPubKeyHash, error){
   }
   cp2AddrP2PKH, ok := cp2Addr.(*btcutil.AddressPubKeyHash)
   if !ok {
-    return nil, errors.New("participant address is not P2PKH")
+    if !ok{
+      return nil, errors.New("participant suca address is not P2PKH")
+    }
   }
   return cp2AddrP2PKH,nil
 }
@@ -515,6 +530,8 @@ func walletPort(params *chaincfg.Params) string {
 		return "8332"
 	case &chaincfg.TestNet3Params:
 		return "18332"
+	case &chaincfg.RegressionNetParams:
+		return "18443"
 	default:
 		return ""
 	}
@@ -713,23 +730,23 @@ func getFeePerKb(c *rpc.Client) (useFee, relayFee btcutil.Amount, err error) {
 		return useFee, relayFee, err
 	}
 
-	fmt.Println("warning: falling back to mempool relay fee policy")
+	fmt.Println("warning: falling back to mempool relay fee policy",err)
 	return relayFee, relayFee, nil
 }
 
-// getRawChangeAddress calls the getrawchangeaddress JSON-RPC method.  It is
+// getRawChangeAddress calls the suca JSON-RPC method.  It is
 // implemented manually as the rpcclient implementation always passes the
 // account parameter which was removed in Bitcoin Core 0.15.
 func getRawChangeAddress(c *rpc.Client) (btcutil.Address, error) {
 	params := []json.RawMessage{[]byte(`"legacy"`)}
 	rawResp, err := c.RawRequest("getrawchangeaddress", params)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("getrawchange:",err)
 	}
 	var addrStr string
 	err = json.Unmarshal(rawResp, &addrStr)
 	if err != nil {
-		return nil, err
+		return nil,fmt.Errorf("cazzo:",err)
 	}
 	addr, err := btcutil.DecodeAddress(addrStr, chainParams)
 	if err != nil {
@@ -740,7 +757,7 @@ func getRawChangeAddress(c *rpc.Client) (btcutil.Address, error) {
 			addrStr, chainParams.Name)
 	}
 	if _, ok := addr.(*btcutil.AddressPubKeyHash); !ok {
-		return nil, fmt.Errorf("getrawchangeaddress: address %v is not P2PKH",
+		return nil, fmt.Errorf("suca: address %v is not P2PKH",
 			addr)
 	}
 	return addr, nil
@@ -803,7 +820,7 @@ func getTxHash(tx wire.MsgTx)([]byte){
 func buildContract(c *rpc.Client, args *contractArgsCmd) (*builtContract, error) {
 	refundAddr, err := getRawChangeAddress(c)
 	if err != nil {
-		return nil, fmt.Errorf("getrawchangeaddress: %v", err)
+		return nil, fmt.Errorf("gaaaaaaaaaaaetrawchangeaddress: %v", err)
 	}
 	refundAddrH, ok := refundAddr.(interface {
 		Hash160() *[ripemd160.Size]byte
@@ -898,7 +915,7 @@ func spendContract(c *rpc.Client, args *spendArgsCmd)(*builtSpend,error) {
 
   addr, err := getRawChangeAddress(c)
   if err != nil {
-    return nil, fmt.Errorf("getrawchangeaddress: %v", err)
+    return nil, fmt.Errorf("aaaaasuca: %v", err)
   }
   outScript, err := txscript.PayToAddrScript(recipientAddr)
   if err != nil {
@@ -1020,6 +1037,29 @@ func (cmd *contractArgsCmd) runCommand(c *rpc.Client) error {
 	return promptPublishTx(c, b.contractTx, "contract")
 }
 
+func (cmd *contractArgsCmd) runDaemonCommand(c *rpc.Client) (any,error) {
+  b, err := buildContract(c, cmd)
+  if err != nil {
+    return nil,err
+  }
+  secret := hex.EncodeToString(cmd.secret)
+  return any(BuildContractOutput{
+    Secret:     &secret,
+    SecretHash: hex.EncodeToString(cmd.secretHash),
+    TxFee:      string(b.contractFee),
+    Contract:   hex.EncodeToString(b.contract),
+    Tx:         b.contractTxHash.String(),
+  }),nil
+}
+
+func (cmd *spendArgsCmd) runDaemonCommand(c *rpc.Client) (any,error) {
+  panic("not implemented")
+  return nil,nil
+}
+func (cmd *auditContractCmd) runDaemonCommand(c *rpc.Client) (any,error) {
+  panic("not implemented")
+  return nil,nil
+}
 func (cmd *spendArgsCmd) runCommand(c *rpc.Client) error {
   b,err := spendContract(c,cmd)
 	if err != nil {
@@ -1237,6 +1277,19 @@ func isOnline() bool {
   return true
 }
 func mainEndpoint(cmd daemonCommand,err error, w http.ResponseWriter, r *http.Request){
+  connConfig := getClientConfig()
+  client, err := rpc.New(&connConfig, nil)
+  if err != nil {
+    fmt.Errorf("rpc connect: %v", err)
+  }
+  defer deferrer(client)
+
+  out, err := cmd.runDaemonCommand(client)
+  if nil!= err {
+    fmt.Println(err)
+  }
+  writeResult(w,err,out)
+
 }
 
 // initiate swap contract
@@ -1277,6 +1330,17 @@ func walletBalanceEndpoint(w http.ResponseWriter,r *http.Request){
 func atomicSwapParamsEndpoint(w http.ResponseWriter,r *http.Request){
 }
 func buildSwapContractEndpoint(w http.ResponseWriter,r *http.Request){
+  var  args BuildContractInput
+  parseBody(r,&args)
+
+  buildArgs,err := parseBuildArgs(args)
+  fmt.Println("Initiate contract requested: ", buildArgs.them, buildArgs.amount)
+  mainEndpoint(buildArgs,err,w,r)
+
 }
 func spendSwapContractEndpoint(w http.ResponseWriter,r *http.Request){
+  var args SpendContractInput
+  parseBody(r,&args)
+  input, err := parseSpendArgs(args)
+  mainEndpoint(input,err,w,r)
 }

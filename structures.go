@@ -104,4 +104,13 @@ func parseBody[V *BuildContractInput | *SpendContractInput | *AuditContractInput
   json.Unmarshal(reqBody, &args)
   return nil
 }
+func writeResult(w http.ResponseWriter, err error, result any){
+    w.Header().Set("Content-Type", "application/json")
+  if err != nil {
+    fmt.Println("/////////////////////////////////error",err)
+    json.NewEncoder(w).Encode(ErrOutput{Err:fmt.Sprintf("%v",err)})
+  } else {
+    json.NewEncoder(w).Encode(result)
+  }
+}
 
