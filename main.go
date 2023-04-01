@@ -808,6 +808,21 @@ type builtSpend struct {
   spendTxFee    btcutil.Amount
   feePerKb btcutil.Amount
 }
+type auditedContract struct {
+  contract      []byte
+  contractTx    wire.MsgTx
+  contractP2SH  btcutil.AddressScriptHash
+  recipient     *btcutil.AddressPubKeyHash
+  amount        btcutil.Amount
+  author        *btcutil.AddressPubKeyHash
+  secretHash    []byte
+  secretSize    int64
+  lockTime      int64
+  txId          chainhash.Hash
+  isSpendable   bool
+  idx           int
+}
+
 func getTxHash(tx wire.MsgTx)([]byte){
   var buf bytes.Buffer
   buf.Grow(tx.SerializeSize())
@@ -1006,7 +1021,86 @@ func extractSecret(args extractSecretCmd)([]byte,error){
   return nil,errors.New("transaction does not contain the secret")
 
 }
+func auditContract(cmd auditContractCmd)(*auditedContract,error){
+  fmt.Println("audit")
+  contractHash160 := btcutil.Hash160(cmd.contract)
+  contractOut := -1
+  for i, out := range cmd.contractTx.TxOut {
+    sc, addrs, _, err := txscript.ExtractPkScriptAddrs(out.PkScript, chainParams)
+    if err != nil || sc != txscript.ScriptHashTy {
+      continue
+    }
+    if bytes.Equal(addrs[0].(*btcutil.AddressScriptHash).Hash160()[:], contractHash160) {
+      contractOut = i
+      break
+    }
+  }
+  if contractOut == -1 {
+    return nil,errors.New("transaction does not contain the contract output")
+  }
 
+  pushes, err := txscript.ExtractAtomicSwapDataPushes(0, cmd.contract)
+  if err != nil {
+    return nil,err
+  }
+  if pushes == nil {
+    return nil,errors.New("contract is not an atomic swap script recognized by this tool")
+  }
+  if pushes.SecretSize != secretSize {
+    return nil,fmt.Errorf("contract specifies strange secret size %v", pushes.SecretSize)
+  }
+
+  contractAddr, err := btcutil.NewAddressScriptHash(cmd.contract, chainParams)
+  if err != nil {
+    return nil, err
+  }
+  recipientAddr, err := btcutil.NewAddressPubKeyHash(pushes.RecipientHash160[:],
+    chainParams)
+  if err != nil {
+    return nil, err
+  }
+  refundAddr, err := btcutil.NewAddressPubKeyHash(pushes.RefundHash160[:],
+    chainParams)
+  if err != nil {
+    return nil,err
+  }
+  fmt.Println("jeòòòè")
+  return &auditedContract {
+    contract:       cmd.contract,
+    contractTx:     *cmd.contractTx,
+    contractP2SH:   *contractAddr,
+    recipient:      recipientAddr,
+    amount:         btcutil.Amount(cmd.contractTx.TxOut[contractOut].Value),
+    author:         refundAddr,
+    secretHash:     pushes.SecretHash[:],
+    secretSize:     pushes.SecretSize,
+    lockTime:       pushes.LockTime,
+    txId:           cmd.contractTx.TxHash(),
+    isSpendable:    false,
+    idx:            contractOut,
+  },nil
+
+}
+
+func getWalletBalance(client *rpc.Client) (*WalletBalanceOutput,error){
+  rawResp3, err :=client.RawRequest("getbalances",[]json.RawMessage{})
+  if err!= nil {
+    return nil,err
+  }
+  var balances map[string]map[string]float64
+  err = json.Unmarshal(rawResp3, &balances)
+  if err != nil {
+    return nil,err
+  }
+  fmt.Println(balances)
+  fmt.Println(balances["mine"]["trusted"])
+  fmt.Println("done")
+  return &WalletBalanceOutput{
+    Available:        fmt.Sprintf("%.8f", balances["mine"]["trusted"]),
+    Pending:          fmt.Sprintf("%.8f", balances["mine"]["untrusted_pending"]),
+    AddressBalances:  []*AddressBalance{},
+  },nil
+}
 
 func sha256Hash(x []byte) []byte {
 	h := sha256.Sum256(x)
@@ -1053,13 +1147,54 @@ func (cmd *contractArgsCmd) runDaemonCommand(c *rpc.Client) (any,error) {
 }
 
 func (cmd *spendArgsCmd) runDaemonCommand(c *rpc.Client) (any,error) {
-  panic("not implemented")
-  return nil,nil
+  b,err := spendContract(c,cmd)
+  if err != nil {
+    return nil,err
+  }
+  return any(SpendContractOutput{
+    Tx:     hex.EncodeToString(b.spendTxHash),
+    TxFee:  string(b.spendTxFee),
+  }),nil
 }
+
+func (cmd *walletBalanceCmd) runDaemonCommand(c *rpc.Client) (any,error) {
+  b,err := getWalletBalance(c)
+  if err != nil {
+    return nil,err
+  }
+  return any(b),err
+}
+
 func (cmd *auditContractCmd) runDaemonCommand(c *rpc.Client) (any,error) {
-  panic("not implemented")
-  return nil,nil
+ data,err := auditContract(*cmd)
+  if err != nil {
+    return nil,err
+  }
+  return any(AuditContractOutput{
+    ContractAddress:  data.contractP2SH.String(),
+    RecipientAddress: data.recipient.String(),
+    Amount:           data.amount.String(),
+    RefundAddress:    data.author.String(),
+    SecretHash:       fmt.Sprintf("%x",data.secretHash),
+    LockTime:         fmt.Sprintf("%d",data.lockTime),
+    TxId:             fmt.Sprintf("%x",data.txId),
+    IsSpendable:      strconv.FormatBool(data.isSpendable),
+  }),nil
 }
+func (cmd *atomicSwapParamsCmd) runDaemonCommand(c *rpc.Client) (any,error) {
+  refundAddr, err := getRawChangeAddress(c)
+  if err != nil {
+    return nil, fmt.Errorf("gaaaaaaaaaaaetrawchangeaddress: %v", err)
+  }
+  return any(AtomicSwapParamsOutput{
+    ReciptAddress:          refundAddr.String(),
+    MaxSecretLen:           strconv.FormatInt(secretSize,10),
+    MinLockTimeInitiate:    string(*ltInitiate),
+    MinLockTimePartecipate: string(*ltInitiate),
+  }),err
+}
+
+
 func (cmd *spendArgsCmd) runCommand(c *rpc.Client) error {
   b,err := spendContract(c,cmd)
 	if err != nil {
@@ -1326,8 +1461,13 @@ func extractSecretEndpoint(w http.ResponseWriter,r *http.Request){
 func pushTxEndpoint(w http.ResponseWriter,r *http.Request){
 }
 func walletBalanceEndpoint(w http.ResponseWriter,r *http.Request){
+  fmt.Println("balance")
+  var args walletBalanceCmd
+  mainEndpoint(&args,nil,w,r)
 }
 func atomicSwapParamsEndpoint(w http.ResponseWriter,r *http.Request){
+  var args atomicSwapParamsCmd
+  mainEndpoint(&args,nil,w,r)
 }
 func buildSwapContractEndpoint(w http.ResponseWriter,r *http.Request){
   var  args BuildContractInput
